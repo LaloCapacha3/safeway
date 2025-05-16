@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState, useCallback } from 'react'
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import mapboxgl from 'mapbox-gl'
 import 'mapbox-gl/dist/mapbox-gl.css'
 import { IoAdd } from 'react-icons/io5'
@@ -39,8 +39,7 @@ const getMarkerIcon = (type: string) => {
   }
 };
 
-// Eliminar console.logs innecesarios
-// En lugar de console.error, usar una función centralizada
+// Función centralizada de log
 const logError = (message: string, error: any) => {
   if (process.env.NODE_ENV !== 'production') {
     console.error(`${message}:`, error);
@@ -55,6 +54,8 @@ export default function DashboardMap({ news, center, darkMode, setMapRef, zoomLe
   const [mapLoaded, setMapLoaded] = useState(false)
   const mountedRef = useRef(true)
   const initializedRef = useRef(false)
+  const newsRef = useRef<NewsItem[]>(news)
+  const darkModeRef = useRef(darkMode)
   
   // Modal state
   const [isModalOpen, setIsModalOpen] = useState(false)
@@ -72,85 +73,108 @@ export default function DashboardMap({ news, center, darkMode, setMapRef, zoomLe
   const [loadingSuggestions, setLoadingSuggestions] = useState(false)
   
   const MAPBOX_TOKEN_VALUE = MAPBOX_TOKEN || process.env.NEXT_PUBLIC_MAPBOX_TOKEN || "your_mapbox_token"
-  mapboxgl.accessToken = MAPBOX_TOKEN_VALUE
   
-  // Función para desmontar raíces de marcadores
+  // Actualizar refs al cambiar props
+  useEffect(() => {
+    newsRef.current = news;
+    darkModeRef.current = darkMode;
+  }, [news, darkMode]);
+  
+  // Función memoizada para desmontar raíces de marcadores
   const safelyUnmountRoots = useCallback(() => {
     if (markerRoots.current.size === 0) return;
     
     const rootsArray = Array.from(markerRoots.current.values());
     markerRoots.current.clear();
     
-    requestAnimationFrame(() => {
-      if (mountedRef.current) {
-        rootsArray.forEach(root => {
-          try { root.unmount(); } catch (_) { /* Silent catch */ }
-        });
-      }
+    rootsArray.forEach(root => {
+      try { root.unmount(); } catch (_) { /* Silent catch */ }
     });
+  }, []);
+  
+  // Procesar coordenadas - función memoizada
+  const processCoordinates = useCallback((coordinates: string | [number, number]): [number, number] => {
+    if (typeof coordinates === 'string') {
+      const coordString = coordinates.replace(/POINT\s*\(/, '').replace(/\)/, '');
+      const [lng, lat] = coordString.split(/\s+/).map(Number);
+      return [lng, lat];
+    }
+    return coordinates;
   }, []);
   
   // Compartir referencia del mapa con el componente padre
   useEffect(() => {
     if (setMapRef && map.current) setMapRef(map);
-  }, [setMapRef, map.current, mapLoaded])
+  }, [setMapRef, mapLoaded]);
   
   // Rastrear el estado de montaje para limpieza
   useEffect(() => {
     mountedRef.current = true;
-    return () => { mountedRef.current = false; };
-  }, []);
-  
-  // Inicializar mapa - removido darkMode de las dependencias para que no se reinicie el mapa al cambiar el modo
-  useEffect(() => {
-    if (initializedRef.current || !mapContainer.current) return;
     
-    try {
-      map.current = new mapboxgl.Map({
-        container: mapContainer.current,
-        style: darkMode ? 'mapbox://styles/mapbox/dark-v11' : 'mapbox://styles/mapbox/light-v11',
-        center: center,
-        zoom: zoomLevel,
-        attributionControl: false
-      });
-      
-      map.current.on('load', () => {
-        if (mountedRef.current && map.current) {
-          setMapLoaded(true);
-          initializedRef.current = true;
-        }
-      });
-      
-      map.current.addControl(new mapboxgl.NavigationControl({
-        showCompass: false
-      }), 'bottom-right');
-    } catch (error) {
-      logError('Error al inicializar el mapa:', error);
-      if (map.current) {
-        try { map.current.remove(); } catch (err) { /* Silently ignore */ }
-      }
-      map.current = null;
-    }
+    // Establecer el token de mapbox solo una vez
+    mapboxgl.accessToken = MAPBOX_TOKEN_VALUE;
     
-    // Limpieza al desmontar
-    return () => {
+    return () => { 
+      mountedRef.current = false;
+      
+      // Limpieza adicional
       markers.current.forEach(marker => {
-        try { marker.remove(); } catch (err) { /* Silently ignore */ }
+        try { marker.remove(); } catch (err) { /* Ignorar silenciosamente */ }
       });
       markers.current = [];
       
       safelyUnmountRoots();
       
       if (map.current) {
-        try { map.current.remove(); } catch (error) { /* Silently ignore */ }
+        try { map.current.remove(); } catch (error) { /* Ignorar silenciosamente */ }
         map.current = null;
       }
       
       initializedRef.current = false;
-    }
-  }, [center, zoomLevel, safelyUnmountRoots])
+    };
+  }, [safelyUnmountRoots, MAPBOX_TOKEN_VALUE]);
   
-  // Manejar cambio de centro
+  // Inicializar mapa - separado y simplificado
+  useEffect(() => {
+    // Si ya está inicializado o no hay contenedor, salir
+    if (initializedRef.current || !mapContainer.current) return;
+    
+    try {
+      const mapStyle = darkMode ? 'mapbox://styles/mapbox/dark-v11' : 'mapbox://styles/mapbox/light-v11';
+      
+      // Crear mapa con el estilo inicial
+      map.current = new mapboxgl.Map({
+        container: mapContainer.current,
+        style: mapStyle,
+        center: center,
+        zoom: zoomLevel,
+        attributionControl: false,
+        failIfMajorPerformanceCaveat: false, // Importante para rendimiento en móviles
+        preserveDrawingBuffer: true // Importante para renderizado consistente
+      });
+      
+      // Agregar controles básicos
+      map.current.addControl(new mapboxgl.NavigationControl({
+        showCompass: false
+      }), 'bottom-right');
+      
+      // Establecer banderas una vez cargado
+      map.current.once('load', () => {
+        if (mountedRef.current) {
+          setMapLoaded(true);
+          initializedRef.current = true;
+        }
+      });
+    } catch (error) {
+      logError('Error al inicializar el mapa:', error);
+      if (map.current) {
+        try { map.current.remove(); } catch (err) { /* Ignorar silenciosamente */ }
+      }
+      map.current = null;
+    }
+  }, [center, zoomLevel, darkMode]);
+  
+  // Manejar cambio de centro - separado para evitar re-renderizado innecesario
   useEffect(() => {
     if (!map.current || !mapLoaded) return;
     
@@ -164,86 +188,39 @@ export default function DashboardMap({ news, center, darkMode, setMapRef, zoomLe
     } catch (error) {
       logError('Error durante flyTo del mapa:', error);
     }
-  }, [center, mapLoaded, zoomLevel])
+  }, [center, mapLoaded, zoomLevel]);
   
-  // Actualizar estilo del mapa cuando cambia el modo oscuro
-  useEffect(() => {
-    if (!map.current || !mapLoaded) return;
-    
-    // Capturar la posición y zoom actuales antes de cambiar el estilo
-    const currentCenter = map.current.getCenter();
-    const currentZoom = map.current.getZoom();
-    const currentBearing = map.current.getBearing();
-    const currentPitch = map.current.getPitch();
-    
-    const timer = setTimeout(() => {
-      try {
-        // Cambiar el estilo y restaurar la posición después
-        map.current?.setStyle(
-          darkMode 
-            ? 'mapbox://styles/mapbox/dark-v11' 
-            : 'mapbox://styles/mapbox/light-v11'
-        );
-        
-        // Restaurar la posición y zoom después de que el estilo se cargue
-        map.current?.once('style.load', () => {
-          if (map.current) {
-            try {
-              map.current.setCenter([currentCenter.lng, currentCenter.lat]);
-              map.current.setZoom(currentZoom);
-              map.current.setBearing(currentBearing);
-              map.current.setPitch(currentPitch);
-            } catch (err) {
-              logError('Error al restaurar la posición del mapa:', err);
-            }
-          }
-        });
-      } catch (error) {
-        logError('Error al cambiar estilo del mapa:', error);
-      }
-    }, 100);
-    
-    return () => clearTimeout(timer);
-  }, [darkMode, mapLoaded]);
-  
-  // Añadir marcadores para noticias
-  useEffect(() => {
+  // Función para actualizar marcadores - extraída para reutilización
+  const updateMarkers = useCallback((newsItems: NewsItem[], isDarkMode: boolean) => {
     if (!map.current || !mapLoaded || !mountedRef.current) return;
     
-    // Limpiar marcadores anteriores
+    // Limpiar marcadores existentes
     markers.current.forEach(marker => {
-      try { marker.remove(); } catch (err) { /* Silently ignore */ }
+      try { marker.remove(); } catch (err) { /* Ignorar silenciosamente */ }
     });
     markers.current = [];
     
+    // Limpiar raíces React
     safelyUnmountRoots();
+    
     const newMarkerRoots = new Map<string, Root>();
     const newMarkers: mapboxgl.Marker[] = [];
     
-    news.forEach((item) => {
+    // Crear nuevos marcadores
+    newsItems.forEach((item) => {
       if (!mountedRef.current || !map.current) return;
       
       try {
-        // Procesar coordenadas si vienen como string en formato "POINT (lng lat)"
-        let coordinates: [number, number];
+        // Procesar coordenadas
+        const coordinates = processCoordinates(item.coordinates);
         
-        if (typeof item.coordinates === 'string') {
-          // Si es string, asumir formato POINT
-          const coordString = (item.coordinates as string).replace(/POINT\s*\(/, '').replace(/\)/, '');
-          const [lng, lat] = coordString.split(/\s+/).map(Number);
-          coordinates = [lng, lat];
-        } else {
-          // Si no es string, asumir que ya es un array [lng, lat]
-          coordinates = item.coordinates as [number, number];
-        }
-        
-        // Crear elemento del marcador
+        // Crear elemento DOM para el marcador
         const markerEl = document.createElement('div');
         markerEl.className = 'marker-pin';
         markerEl.style.width = '40px';
         markerEl.style.height = '40px';
         markerEl.style.borderRadius = '50%';
-        markerEl.style.backgroundColor = darkMode ? '#374151' : 'white';
+        markerEl.style.backgroundColor = isDarkMode ? '#374151' : 'white';
         markerEl.style.border = '2px solid';
         markerEl.style.borderColor = getMarkerColor(item.type);
         markerEl.style.boxShadow = '0 3px 6px rgba(0,0,0,0.2)';
@@ -252,33 +229,32 @@ export default function DashboardMap({ news, center, darkMode, setMapRef, zoomLe
         markerEl.style.justifyContent = 'center';
         markerEl.style.color = getMarkerColor(item.type);
         
-        // Crear contenedor de icono
+        // Crear contenedor para el icono
         const iconContainer = document.createElement('div');
         markerEl.appendChild(iconContainer);
         
-        // Crear raíz de React
+        // Crear raíz React para el icono
         const markerId = `marker-${item.id}`;
         const root = createRoot(iconContainer);
-        
-        // Renderizar icono
         root.render(getMarkerIcon(item.type));
         
-        // Almacenar raíz para limpieza
+        // Registrar raíz para limpieza posterior
         newMarkerRoots.set(markerId, root);
         
-        // Crear popup con contenido
+        // Crear contenido del popup
         const popupHtml = `
-          <div style="padding: 15px; background-color: ${darkMode ? '#374151' : 'white'}; border-radius: 8px; color: ${darkMode ? '#f3f4f6' : '#1f2937'};">
+          <div style="padding: 15px; background-color: ${isDarkMode ? '#374151' : 'white'}; border-radius: 8px; color: ${isDarkMode ? '#f3f4f6' : '#1f2937'};">
             <h3 style="font-weight: bold; margin-bottom: 8px; font-size: 16px;">${item.title}</h3>
-            <p style="font-size: 14px; margin-bottom: 10px; color: ${darkMode ? '#d1d5db' : '#4b5563'};">${item.description}</p>
+            <p style="font-size: 14px; margin-bottom: 10px; color: ${isDarkMode ? '#d1d5db' : '#4b5563'};">${item.description}</p>
             <div style="display: flex; align-items: center; justify-content: space-between; font-size: 12px; margin-top: 10px;">
-              <span style="color: ${darkMode ? '#9ca3af' : '#6b7280'}; padding: 3px 8px; border-radius: 4px; background-color: ${darkMode ? '#1f2937' : '#f3f4f6'};">
+              <span style="color: ${isDarkMode ? '#9ca3af' : '#6b7280'}; padding: 3px 8px; border-radius: 4px; background-color: ${isDarkMode ? '#1f2937' : '#f3f4f6'};">
                 ${item.type.charAt(0).toUpperCase() + item.type.slice(1)}
               </span>
             </div>
           </div>
         `;
         
+        // Crear popup
         const popup = new mapboxgl.Popup({
           offset: 25,
           closeButton: false,
@@ -287,7 +263,7 @@ export default function DashboardMap({ news, center, darkMode, setMapRef, zoomLe
           className: 'custom-popup'
         }).setHTML(popupHtml);
         
-        // Crear marcador
+        // Crear y añadir marcador
         const marker = new mapboxgl.Marker(markerEl)
           .setLngLat(coordinates)
           .setPopup(popup);
@@ -296,7 +272,7 @@ export default function DashboardMap({ news, center, darkMode, setMapRef, zoomLe
           marker.addTo(map.current);
           newMarkers.push(marker);
         } else {
-          try { root.unmount(); } catch (err) { /* Silently ignore */ }
+          try { root.unmount(); } catch (err) { /* Ignorar silenciosamente */ }
         }
       } catch (error) {
         logError('Error al añadir marcador:', error);
@@ -306,23 +282,73 @@ export default function DashboardMap({ news, center, darkMode, setMapRef, zoomLe
     // Actualizar referencias
     markers.current = newMarkers;
     markerRoots.current = newMarkerRoots;
-    
-    return () => {
-      newMarkers.forEach(marker => {
-        try { marker.remove(); } catch (err) { /* Silently ignore */ }
-      });
-      safelyUnmountRoots();
-    };
-  }, [news, mapLoaded, darkMode, safelyUnmountRoots]);
+  }, [mapLoaded, processCoordinates, safelyUnmountRoots]);
   
-  // Fetch location suggestions
-  const fetchLocationSuggestions = async (query: string) => {
+  // Actualizar estilo del mapa cuando cambia el modo oscuro - optimizado
+  useEffect(() => {
+    if (!map.current || !mapLoaded) return;
+    
+    // Importante: establecer el valor actual para comparar en el próximo cambio
+    darkModeRef.current = darkMode;
+    
+    try {
+      // Capturar estado actual del mapa
+      const currentCenter = map.current.getCenter();
+      const currentZoom = map.current.getZoom();
+      const currentBearing = map.current.getBearing();
+      const currentPitch = map.current.getPitch();
+      
+      // Cambiar el estilo
+      const mapStyle = darkMode ? 'mapbox://styles/mapbox/dark-v11' : 'mapbox://styles/mapbox/light-v11';
+      map.current.setStyle(mapStyle);
+      
+      // Usando el evento 'styledata' en lugar de 'style.load' para mayor fiabilidad
+      const styleDataHandler = () => {
+        if (!map.current || !mountedRef.current) return;
+        
+        try {
+          // Restaurar la vista del mapa
+          map.current.setCenter([currentCenter.lng, currentCenter.lat]);
+          map.current.setZoom(currentZoom);
+          map.current.setBearing(currentBearing);
+          map.current.setPitch(currentPitch);
+          
+          // Actualizar marcadores después del cambio de estilo
+          setTimeout(() => {
+            if (mountedRef.current && map.current) {
+              updateMarkers(newsRef.current, darkMode);
+            }
+          }, 150);
+          
+          // Limpiar evento
+          map.current.off('styledata', styleDataHandler);
+        } catch (err) {
+          logError('Error al restaurar la posición del mapa:', err);
+        }
+      };
+      
+      // Registrar manejador de evento
+      map.current.on('styledata', styleDataHandler);
+    } catch (error) {
+      logError('Error al cambiar estilo del mapa:', error);
+    }
+  }, [darkMode, mapLoaded, updateMarkers]);
+  
+  // Actualizar marcadores cuando cambian las noticias
+  useEffect(() => {
+    if (map.current && mapLoaded) {
+      updateMarkers(news, darkMode);
+    }
+  }, [news, mapLoaded, darkMode, updateMarkers]);
+  
+  // Fetch location suggestions - debounced
+  const fetchLocationSuggestions = useCallback(async (query: string) => {
     if (!query.trim()) {
-      setLocationSuggestions([])
-      return
+      setLocationSuggestions([]);
+      return;
     }
 
-    setLoadingSuggestions(true)
+    setLoadingSuggestions(true);
     try {
       const response = await axios.get(
         `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(query)}.json`,
@@ -334,63 +360,64 @@ export default function DashboardMap({ news, center, darkMode, setMapRef, zoomLe
             limit: 5
           }
         }
-      )
+      );
       
       if (response.data && response.data.features) {
-        setLocationSuggestions(response.data.features)
-        setShowSuggestions(true)
+        setLocationSuggestions(response.data.features);
+        setShowSuggestions(true);
       }
     } catch (error) {
-      logError("Error fetching location suggestions:", error)
-      setLocationSuggestions([])
+      logError("Error fetching location suggestions:", error);
+      setLocationSuggestions([]);
     } finally {
-      setLoadingSuggestions(false)
+      setLoadingSuggestions(false);
     }
-  }
+  }, [MAPBOX_TOKEN_VALUE]);
   
-  // Debounce for location search
+  // Debounce para búsqueda de ubicaciones
   useEffect(() => {
     const timer = setTimeout(() => {
       if (newIssue.location) {
-        fetchLocationSuggestions(newIssue.location)
+        fetchLocationSuggestions(newIssue.location);
       } else {
-        setLocationSuggestions([])
-        setShowSuggestions(false)
+        setLocationSuggestions([]);
+        setShowSuggestions(false);
       }
-    }, 300)
+    }, 300);
 
-    return () => clearTimeout(timer)
-  }, [newIssue.location])
+    return () => clearTimeout(timer);
+  }, [newIssue.location, fetchLocationSuggestions]);
   
-  // Handle location selection from suggestions
-  const handleSelectLocation = (location: any) => {
+  // Manejar selección de ubicación
+  const handleSelectLocation = useCallback((location: any) => {
     setShowSuggestions(false);
-    setNewIssue({
-      ...newIssue,
+    setNewIssue(prev => ({
+      ...prev,
       location: location.place_name,
       coordinates: location.geometry.coordinates
-    });
-  }
+    }));
+  }, []);
   
+  // Manejar envío del formulario
   const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
+    e.preventDefault();
     
-    // Create date if not provided
+    // Crear fecha si no se proporciona
     const issueDate = newIssue.date || new Date().toISOString().split('T')[0];
     
-    // Prepare data for submission (omit 'location')
+    // Preparar datos (omitir 'location')
     const { location, ...rest } = newIssue;
     const formData = {
       ...rest,
       date: issueDate,
-      coordinates: `POINT(${newIssue.coordinates[0]} ${newIssue.coordinates[1]})`, // Cambiado a formato POINT
+      coordinates: `POINT(${newIssue.coordinates[0]} ${newIssue.coordinates[1]})`,
     };
   
     try {
-      // Obtener el token de autenticación
+      // Obtener token de autenticación
       const token = localStorage.getItem('authToken');
       
-      // Post to backend using correct endpoint
+      // Enviar a backend
       const response = await fetch(NEWS_ENDPOINTS.CREATE, {
         method: 'POST',
         headers: {
@@ -402,11 +429,10 @@ export default function DashboardMap({ news, center, darkMode, setMapRef, zoomLe
       
       if (!response.ok) {
         const errorData = await response.json();
-        logError('Error creando noticia:', errorData);
         throw new Error(errorData.detail ? JSON.stringify(errorData.detail) : errorData.message || 'Failed to create news item');
       }
       
-      // Reset form and close modal
+      // Resetear formulario y cerrar modal
       setNewIssue({
         title: '',
         description: '',
@@ -417,66 +443,67 @@ export default function DashboardMap({ news, center, darkMode, setMapRef, zoomLe
         coordinates: [] as [number, number] | []
       });
       setIsModalOpen(false);
-      
-      // TODO: Refresh news data or add to local news state
-      
     } catch (error) {
       logError('Error submitting news item:', error);
-      // Handle error (show notification, etc.)
     }
-  }
+  };
+  
+  // Crear estilos globales una sola vez
+  const mapStyles = useMemo(() => {
+    return `
+      .mapboxgl-popup-content {
+        box-shadow: 0 2px 10px rgba(0,0,0,0.15);
+        border: none;
+        border-radius: 10px;
+        padding: 0;
+      }
+      .mapboxgl-ctrl-logo { display: none !important; }
+      .dark .mapboxgl-popup-content {
+        background-color: #374151;
+        color: #f3f4f6;
+      }
+      .dark .mapboxgl-popup-tip {
+        border-top-color: #374151;
+        border-bottom-color: #374151;
+      }
+      .mapboxgl-ctrl-bottom-right {
+        bottom: 12px;
+        right: 12px;
+      }
+      @media (max-width: 640px) {
+        .mapboxgl-ctrl-bottom-right {
+          bottom: 80px;
+          right: 10px;
+        }
+        .mapboxgl-ctrl-group {
+          transform: scale(0.9);
+          transform-origin: bottom right;
+        }
+      }
+      
+      /* Fix for iOS height issues */
+      html, body, #__next {
+        height: 100%;
+        width: 100%;
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+      }
+      
+      @supports (-webkit-touch-callout: none) {
+        .h-screen {
+          height: -webkit-fill-available;
+        }
+      }
+    `;
+  }, []);
   
   return (
     <div className="flex-1 w-full h-full relative">
       <div ref={mapContainer} className="w-full h-full absolute inset-0" />
       
       {/* Estilos CSS para el mapa */}
-      <style jsx global>{`
-        .mapboxgl-popup-content {
-          box-shadow: 0 2px 10px rgba(0,0,0,0.15);
-          border: none;
-          border-radius: 10px;
-          padding: 0;
-        }
-        .mapboxgl-ctrl-logo { display: none !important; }
-        .dark .mapboxgl-popup-content {
-          background-color: #374151;
-          color: #f3f4f6;
-        }
-        .dark .mapboxgl-popup-tip {
-          border-top-color: #374151;
-          border-bottom-color: #374151;
-        }
-        .mapboxgl-ctrl-bottom-right {
-          bottom: 12px;
-          right: 12px;
-        }
-        @media (max-width: 640px) {
-          .mapboxgl-ctrl-bottom-right {
-            bottom: 80px;
-            right: 10px;
-          }
-          .mapboxgl-ctrl-group {
-            transform: scale(0.9);
-            transform-origin: bottom right;
-          }
-        }
-        
-        /* Fix for iOS height issues */
-        html, body, #__next {
-          height: 100%;
-          width: 100%;
-          margin: 0;
-          padding: 0;
-          overflow: hidden;
-        }
-        
-        @supports (-webkit-touch-callout: none) {
-          .h-screen {
-            height: -webkit-fill-available;
-          }
-        }
-      `}</style>
+      <style jsx global>{mapStyles}</style>
       
       {!mapLoaded && (
         <div className={`absolute inset-0 flex items-center justify-center ${darkMode ? 'bg-gray-800 bg-opacity-50' : 'bg-gray-100 bg-opacity-50'}`}>
